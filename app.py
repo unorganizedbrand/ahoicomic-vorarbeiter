@@ -64,7 +64,7 @@ def _shopify_client(shop: str, cid: str, secret: str, version: str) -> core.Shop
 
 def shopify() -> Optional[core.ShopifyClient]:
     c = _shopify_client(
-        _secret("SHOPIFY_SHOP", "ahoicomic"),
+        _secret("SHOPIFY_SHOP", "vavedi-e6"),  # Ahoi Comic = vavedi-e6.myshopify.com
         _secret("SHOPIFY_CLIENT_ID"),
         _secret("SHOPIFY_CLIENT_SECRET"),
         _secret("SHOPIFY_API_VERSION", core.DEFAULT_SHOPIFY_API_VERSION),
