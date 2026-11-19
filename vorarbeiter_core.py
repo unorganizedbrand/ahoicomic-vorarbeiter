@@ -780,9 +780,10 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
                 "weitere_foto_ids": [f["foto_id"] for f in fotos[1:]],
                 "foto_positionen": {f["foto_id"]: str(f.get("position") or "") for f in fotos},
                 "zuschnitte": {
-                    f["foto_id"]: expand_box(normalize_box(f.get("box")))
+                    f["foto_id"]: box
                     for f in fotos
-                    if normalize_box(f.get("box")) and subject_count(by_id[f["foto_id"]]) > 1
+                    for box in [auto_crop_box(by_id[f["foto_id"]], raw, f)]
+                    if box
                 },
                 "ki_hauptfoto": fotos[0]["foto_id"] if fotos else "",
                 "hauptfoto_grund": str(raw.get("hauptfoto_grund") or ""),
@@ -807,6 +808,62 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
         "ki_meldungen": [m for m in story.get("meldungen") or [] if isinstance(m, dict) and m.get("text")],
         "fotos_ohne_zuordnung_ki": story.get("fotos_ohne_zuordnung") or [],
     }
+
+
+def _box_area(box: List[float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _norm_words(s: str) -> set:
+    return {w for w in re.findall(r"[a-zäöüß]+", (s or "").lower()) if len(w) > 2}
+
+
+def auto_crop_box(photo: Photo, person: Dict[str, Any], foto_entry: Dict[str, Any]) -> Optional[List[float]]:
+    """Ermittelt automatisch den Ausschnitt, auf dem nur diese Figur zu sehen ist.
+
+    Reihenfolge: Box aus der Story-Analyse -> passende Person/Tier aus der Bildanalyse
+    (einzige Kandidatin, Position, Alter). Zugeschnitten wird bei Gruppenfotos und wenn die
+    Figur nur einen kleinen Teil des Bildes einnimmt.
+    """
+    a = photo.analyse or {}
+    art = str(person.get("art") or "Mensch")
+    menschen = [x for x in a.get("personen") or [] if normalize_box(x.get("box"))]
+    tiere = [x for x in a.get("tiere") or [] if normalize_box(x.get("box"))]
+    n_subjects = subject_count(photo)
+
+    box = normalize_box(foto_entry.get("box"))
+    if not box:
+        cands = tiere if art == "Tier" else menschen
+        chosen = None
+        if len(cands) == 1:
+            chosen = cands[0]
+        elif cands:
+            pos = _norm_words(str(foto_entry.get("position") or ""))
+            if pos:
+                scored = sorted(cands, key=lambda x: -len(pos & _norm_words(str(x.get("position") or ""))))
+                if len(pos & _norm_words(str(scored[0].get("position") or ""))) > 0 and (
+                    len(scored) == 1
+                    or len(pos & _norm_words(str(scored[0].get("position") or "")))
+                    > len(pos & _norm_words(str(scored[1].get("position") or "")))
+                ):
+                    chosen = scored[0]
+            if chosen is None and art != "Tier":
+                age = _num(person.get("alter_text")) if person.get("alter_text") not in (None, "") else _num(person.get("alter_foto"))
+                if age is not None:
+                    with_age = [x for x in cands if _num(x.get("alter_geschaetzt")) is not None]
+                    if len(with_age) >= 2:
+                        with_age.sort(key=lambda x: abs(_num(x.get("alter_geschaetzt")) - age))
+                        d0 = abs(_num(with_age[0].get("alter_geschaetzt")) - age)
+                        d1 = abs(_num(with_age[1].get("alter_geschaetzt")) - age)
+                        if d1 - d0 >= 8:  # eindeutig näher dran
+                            chosen = with_age[0]
+        if chosen is not None:
+            box = normalize_box(chosen.get("box"))
+    if not box:
+        return None
+    if n_subjects > 1 or _box_area(box) < 0.45:
+        return expand_box(box)
+    return None
 
 
 def subject_count(p: Photo) -> int:
