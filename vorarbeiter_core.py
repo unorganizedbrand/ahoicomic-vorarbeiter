@@ -567,7 +567,11 @@ Antworte NUR mit JSON in genau diesem Format:
   ],
   "tiere": [{"position": "...", "art": "z.B. Hund", "rasse": "falls erkennbar", "merkmale": "Fell, Farbe"}],
   "qualitaet": "gut" | "mittel" | "schlecht",
-  "qualitaet_grund": "z.B. unscharf, Gesicht verdeckt, zu dunkel, Sonnenbrille - leer wenn gut"
+  "qualitaet_grund": "z.B. unscharf, Gesicht verdeckt, zu dunkel, Sonnenbrille - leer wenn gut",
+  "gesicht_sichtbar": "gut" | "teilweise" | "nein",
+  "eignung_charakter": Zahl 1-10 (wie gut eignet sich das Foto als Vorlage fuer eine Comicfigur: Gesicht frontal und
+    scharf, Haare/Frisur erkennbar, moeglichst nur diese Person, gute Aufloesung und Licht),
+  "eignung_grund": "kurz, z.B. Gesicht frontal und scharf / Gesicht klein, Gruppenfoto"
 }
 Schaetze das Alter realistisch. Erfinde nichts, was nicht zu sehen ist."""
 
@@ -594,6 +598,9 @@ AUFGABE:
    Beziehungen (Papa, Tochter, Ehemann ...), Bildbeschreibungen des Kunden und die Reihenfolge der Uploads.
    Bei Gruppenfotos gib die Position der Figur auf dem Foto an. Ein Foto kann mehreren Figuren gehoeren
    (Gruppenfoto). Wenn du unsicher bist, sage es offen (zuordnung_sicherheit "niedrig").
+   Hat eine Figur MEHRERE Fotos, liste ALLE ihre Fotos auf und setze das Foto an die ERSTE Stelle, mit dem sich
+   die Comicfigur am besten erstellen laesst (beste Qualitaet, Gesicht gut sichtbar, moeglichst allein im Bild,
+   hohe "eignung_charakter"). Begruende die Wahl in "hauptfoto_grund".
 4. Vergleiche das Alter laut Text mit dem geschaetzten Alter auf dem Foto.
 5. Schreibe ein klares Briefing (Deutsch) fuer den Comic-Autor: nur Story-relevantes, gut gegliedert,
    alle Kundenwuensche erhalten, nichts dazuerfinden.
@@ -616,6 +623,7 @@ Antworte NUR mit JSON in genau diesem Format:
      "beschreibung": "Aussehen/Eigenschaften laut Text und Foto, Beruf, Hobbys - kurz",
      "outfit_kunde": "nur wenn der Kunde Kleidung ausdruecklich vorgibt, sonst leer",
      "fotos": [{"foto_id": "P1", "position": "z.B. links / einzige Person"}],
+     "hauptfoto_grund": "nur bei mehreren Fotos: warum das erste Foto am besten ist",
      "zuordnung_sicherheit": "hoch" | "mittel" | "niedrig" | "kein_foto",
      "begruendung": "kurz, warum dieses Foto"}
   ],
@@ -705,7 +713,9 @@ def _photo_block(photos: List[Photo]) -> str:
         )
         tiere = "; ".join(f"{x.get('art', '?')} {x.get('rasse', '')} ({x.get('position', '')})" for x in a.get("tiere") or [])
         lines.append(
-            f"{p.id} [{p.herkunft}]: Personen: {pers or 'keine'} | Tiere: {tiere or 'keine'} | Qualitaet: {a.get('qualitaet', '?')}"
+            f"{p.id} [{p.herkunft}, {p.original_breite}x{p.original_hoehe} px]: Personen: {pers or 'keine'} | Tiere: {tiere or 'keine'}"
+            f" | Qualitaet: {a.get('qualitaet', '?')} | Gesicht: {a.get('gesicht_sichtbar', '?')}"
+            f" | Eignung Charakter: {a.get('eignung_charakter', '?')}/10"
         )
     return "\n".join(lines) or "(keine Fotos)"
 
@@ -758,6 +768,10 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
                 "foto_id": fotos[0]["foto_id"] if fotos else "",
                 "foto_position": str(fotos[0].get("position") or "") if fotos else "",
                 "weitere_foto_ids": [f["foto_id"] for f in fotos[1:]],
+                "foto_positionen": {f["foto_id"]: str(f.get("position") or "") for f in fotos},
+                "ki_hauptfoto": fotos[0]["foto_id"] if fotos else "",
+                "hauptfoto_grund": str(raw.get("hauptfoto_grund") or ""),
+                "hauptfoto_bestaetigt": len(fotos) <= 1,
                 "zuordnung_sicherheit": str(raw.get("zuordnung_sicherheit") or ("kein_foto" if not fotos else "mittel")),
                 "begruendung": str(raw.get("begruendung") or ""),
             }
@@ -778,6 +792,21 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
         "ki_meldungen": [m for m in story.get("meldungen") or [] if isinstance(m, dict) and m.get("text")],
         "fotos_ohne_zuordnung_ki": story.get("fotos_ohne_zuordnung") or [],
     }
+
+
+def photo_suitability(p: Photo) -> str:
+    """Kurzbewertung eines Fotos fuer die Anzeige (Eignung fuer das Charakter-Sheet)."""
+    a = p.analyse or {}
+    teile = []
+    if a.get("eignung_charakter") not in (None, ""):
+        teile.append(f"Eignung {a.get('eignung_charakter')}/10")
+    if a.get("gesicht_sichtbar"):
+        teile.append(f"Gesicht {a.get('gesicht_sichtbar')}")
+    if p.original_breite:
+        teile.append(f"{p.original_breite}×{p.original_hoehe} px")
+    if a.get("eignung_grund"):
+        teile.append(str(a.get("eignung_grund")))
+    return " · ".join(teile)
 
 
 def _age_mismatch(text_age: Optional[int], photo_age: Optional[int]) -> bool:
@@ -829,6 +858,10 @@ def check_result(result: Dict[str, Any], order: Optional[Dict[str, Any]], photos
             out.append(Meldung("fehler", f"{name}: zugeordnetes Foto {fid} existiert nicht."))
             continue
         used.setdefault(fid, []).append(name)
+        n_fotos = 1 + len([f for f in pers.get("weitere_foto_ids") or [] if f in by_id])
+        if n_fotos > 1 and not pers.get("hauptfoto_bestaetigt"):
+            vorschlag = pers.get("ki_hauptfoto") or fid
+            out.append(Meldung("warnung", f"{name}: {n_fotos} Fotos – bitte Hauptfoto wählen (KI-Vorschlag: {vorschlag})."))
         if pers.get("zuordnung_sicherheit") == "niedrig":
             out.append(Meldung("warnung", f"{name}: Zuordnung zu Foto {fid} ist unsicher – bitte prüfen."))
         if _age_mismatch(pers.get("alter_text"), pers.get("alter_foto")):
