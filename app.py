@@ -399,6 +399,19 @@ def read_widgets_into_result(result: Dict[str, Any]) -> None:
                 p["hauptfoto_bestaetigt"] = True
             p["foto_id"] = haupt
             p["weitere_foto_ids"] = [x for x in fotos if x != haupt]
+        # Zuschnitt des Hauptfotos (nur diese Figur im Bild)
+        hid = p.get("foto_id") or ""
+        if hid and f"p_{pid}_crop_on_{hid}" in st.session_state:
+            crops = dict(p.get("zuschnitte") or {})
+            if st.session_state.get(f"p_{pid}_crop_on_{hid}"):
+                cx = st.session_state.get(f"p_{pid}_cx_{hid}") or (0, 100)
+                cy = st.session_state.get(f"p_{pid}_cy_{hid}") or (0, 100)
+                box = core.normalize_box([cx[0], cy[0], cx[1], cy[1]])
+                if box:
+                    crops[hid] = box
+            else:
+                crops.pop(hid, None)
+            p["zuschnitte"] = crops
 
 
 st.write("")
@@ -537,6 +550,36 @@ if result:
                     if pers.get("hauptfoto_grund"):
                         st.caption(f"KI: {pers['hauptfoto_grund']}")
                     st.checkbox("Hauptfoto passt", key=f"p_{pid}_ok")
+
+                # Zuschneiden: maximal eine Person/Figur pro Bild
+                hid = st.session_state.get(f"p_{pid}_haupt")
+                hph = photo_by_id.get(hid)
+                if hph and hph.jpeg:
+                    crop = (pers.get("zuschnitte") or {}).get(hid)
+                    n_subj = core.subject_count(hph)
+                    on_key, cx_key, cy_key = f"p_{pid}_crop_on_{hid}", f"p_{pid}_cx_{hid}", f"p_{pid}_cy_{hid}"
+                    if on_key not in st.session_state:
+                        st.session_state[on_key] = bool(crop)
+                    b0 = crop or [0, 0, 1, 1]
+                    cx_default = (int(round(b0[0] * 100)), int(round(b0[2] * 100)))
+                    cy_default = (int(round(b0[1] * 100)), int(round(b0[3] * 100)))
+                    hint = f" – auf dem Foto sind {n_subj} Personen/Tiere" if n_subj > 1 else ""
+                    st.checkbox(f"✂️ Hauptfoto zuschneiden, sodass nur {pers.get('name')} zu sehen ist{hint}", key=on_key)
+                    if st.session_state.get(on_key):
+                        z1, z2 = st.columns([2, 1])
+                        with z1:
+                            st.slider("Ausschnitt links → rechts (%)", 0, 100, value=st.session_state.get(cx_key, cx_default), key=cx_key)
+                            st.slider("Ausschnitt oben → unten (%)", 0, 100, value=st.session_state.get(cy_key, cy_default), key=cy_key)
+                            if crop:
+                                st.caption("Vorschlag der KI vorausgefüllt – bei Bedarf anpassen.")
+                        with z2:
+                            cx = st.session_state.get(cx_key) or cx_default
+                            cy = st.session_state.get(cy_key) or cy_default
+                            box = core.normalize_box([cx[0], cy[0], cx[1], cy[1]])
+                            if box:
+                                st.image(core.crop_jpeg(core.to_jpeg(core.load_image_bytes(hph.jpeg)[0], 600, 80), box), caption="Ausschnitt für die Comic-App", width="stretch")
+                            else:
+                                st.warning("Ausschnitt zu klein.")
             if f"p_{pid}_foto_position_next" in st.session_state:
                 st.session_state[f"p_{pid}_foto_position"] = st.session_state.pop(f"p_{pid}_foto_position_next")
             st.text_input("Position auf dem Hauptfoto", key=f"p_{pid}_foto_position", placeholder="z. B. links, mit Brille")
