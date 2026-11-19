@@ -329,7 +329,7 @@ def run_analysis() -> None:
     st.rerun()
 
 
-PERSON_FIELDS = ("name", "rolle", "art", "beziehung", "alter_text", "alter_foto", "beschreibung", "outfit", "foto_id", "foto_position", "aktiv")
+PERSON_FIELDS = ("name", "rolle", "art", "beziehung", "alter_text", "alter_foto", "beschreibung", "outfit", "foto_position", "aktiv")
 
 
 def load_result_into_widgets(result: Dict[str, Any]) -> None:
@@ -349,13 +349,15 @@ def load_result_into_widgets(result: Dict[str, Any]) -> None:
             val = p.get(f)
             if f in ("alter_text", "alter_foto"):
                 val = "" if val is None else str(val)
-            if f == "foto_id":
-                val = val or "—"
             if f == "rolle" and val not in ("Hauptfigur", "Nebenfigur", "Bösewicht"):
                 val = "Nebenfigur"
             if f == "art" and val not in ("Mensch", "Tier", "Fantasiefigur"):
                 val = "Mensch"
             st.session_state[f"p_{pid}_{f}"] = val if val is not None else ""
+        fotos = ([p["foto_id"]] if p.get("foto_id") else []) + list(p.get("weitere_foto_ids") or [])
+        st.session_state[f"p_{pid}_fotos"] = fotos
+        st.session_state[f"p_{pid}_haupt"] = p.get("foto_id") or ""
+        st.session_state[f"p_{pid}_ok"] = bool(p.get("hauptfoto_bestaetigt"))
 
 
 def read_widgets_into_result(result: Dict[str, Any]) -> None:
@@ -377,13 +379,39 @@ def read_widgets_into_result(result: Dict[str, Any]) -> None:
             val = st.session_state[key]
             if f in ("alter_text", "alter_foto"):
                 val = core._num(val)
-            if f == "foto_id":
-                if val == "—":
-                    val = ""
-                if val != p.get("foto_id"):  # manuell geändert -> Zuordnung gilt als geprüft
-                    p["zuordnung_sicherheit"] = "manuell" if val else "kein_foto"
-                    p["weitere_foto_ids"] = [x for x in p.get("weitere_foto_ids") or [] if x != val]
             p[f] = val
+        # Fotos dieser Person und Hauptfoto
+        if f"p_{pid}_fotos" in st.session_state:
+            alt = ([p["foto_id"]] if p.get("foto_id") else []) + list(p.get("weitere_foto_ids") or [])
+            fotos = [x for x in st.session_state.get(f"p_{pid}_fotos") or [] if x]
+            haupt = st.session_state.get(f"p_{pid}_haupt") or ""
+            if haupt not in fotos:
+                haupt = p.get("foto_id") if p.get("foto_id") in fotos else (fotos[0] if fotos else "")
+            if set(fotos) != set(alt):  # manuell geändert -> Zuordnung gilt als geprüft
+                p["zuordnung_sicherheit"] = "manuell" if fotos else "kein_foto"
+            if haupt != p.get("foto_id"):
+                p["hauptfoto_bestaetigt"] = True
+                pos = (p.get("foto_positionen") or {}).get(haupt)
+                if pos is not None:
+                    p["foto_position"] = pos
+                    st.session_state[f"p_{pid}_foto_position_next"] = pos
+            if st.session_state.get(f"p_{pid}_ok"):
+                p["hauptfoto_bestaetigt"] = True
+            p["foto_id"] = haupt
+            p["weitere_foto_ids"] = [x for x in fotos if x != haupt]
+        # Zuschnitt des Hauptfotos (nur diese Figur im Bild)
+        hid = p.get("foto_id") or ""
+        if hid and f"p_{pid}_crop_on_{hid}" in st.session_state:
+            crops = dict(p.get("zuschnitte") or {})
+            if st.session_state.get(f"p_{pid}_crop_on_{hid}"):
+                cx = st.session_state.get(f"p_{pid}_cx_{hid}") or (0, 100)
+                cy = st.session_state.get(f"p_{pid}_cy_{hid}") or (0, 100)
+                box = core.normalize_box([cx[0], cy[0], cx[1], cy[1]])
+                if box:
+                    crops[hid] = box
+            else:
+                crops.pop(hid, None)
+            p["zuschnitte"] = crops
 
 
 st.write("")
@@ -463,14 +491,17 @@ if result:
 
     # Figuren
     st.subheader("Figuren und Foto-Zuordnung")
-    photo_options = ["—"] + [p.id for p in person_photos if p.jpeg]
-    photo_labels = {"—": "kein Foto"}
-    photo_labels.update({p.id: f"{p.id} · {p.herkunft}" for p in person_photos})
+    photo_options = [p.id for p in person_photos if p.jpeg]
+    photo_labels = {p.id: f"{p.id} · {p.herkunft}" for p in person_photos}
+    photo_by_id = {p.id: p for p in photos}
     for pers in result.get("personen", []):
         pid = pers["id"]
         sicher = pers.get("zuordnung_sicherheit", "")
         badge = {"hoch": "🟢", "mittel": "🟡", "niedrig": "🔴", "kein_foto": "⚪", "manuell": "🔵"}.get(sicher, "⚪")
-        with st.expander(f"{badge} {pers.get('name')} · {pers.get('rolle')} · {pers.get('art')}", expanded=sicher in ("niedrig", "kein_foto")):
+        n_fotos = (1 if pers.get("foto_id") else 0) + len(pers.get("weitere_foto_ids") or [])
+        foto_badge = f" · 📷 {n_fotos} Fotos" if n_fotos > 1 else ""
+        offen = sicher in ("niedrig", "kein_foto") or (n_fotos > 1 and not pers.get("hauptfoto_bestaetigt"))
+        with st.expander(f"{badge} {pers.get('name')} · {pers.get('rolle')} · {pers.get('art')}{foto_badge}", expanded=offen):
             a1, a2, a3, a4 = st.columns([2, 1, 1, 1])
             with a1:
                 st.text_input("Name", key=f"p_{pid}_name")
@@ -487,18 +518,71 @@ if result:
                 st.text_input("Alter laut Text", key=f"p_{pid}_alter_text")
             with b3:
                 st.text_input("Alter laut Foto (KI)", key=f"p_{pid}_alter_foto")
-            f1, f2, f3 = st.columns([1, 1, 1])
-            with f1:
-                if st.session_state.get(f"p_{pid}_foto_id") not in photo_options:
-                    st.session_state[f"p_{pid}_foto_id"] = "—"
-                st.selectbox("Foto", photo_options, format_func=lambda x: photo_labels.get(x, x), key=f"p_{pid}_foto_id")
-            with f2:
-                st.text_input("Position auf dem Foto", key=f"p_{pid}_foto_position", placeholder="z. B. links, mit Brille")
-            with f3:
-                fid = st.session_state.get(f"p_{pid}_foto_id")
-                match = next((p for p in photos if p.id == fid and p.jpeg), None)
-                if match:
-                    st.image(core.to_jpeg(core.load_image_bytes(match.jpeg)[0], 240, 80), width=120)
+            # Fotos dieser Person + Hauptfoto (KI-Vorschlag, manuell änderbar)
+            st.session_state[f"p_{pid}_fotos"] = [x for x in st.session_state.get(f"p_{pid}_fotos") or [] if x in photo_options]
+            st.multiselect(
+                "Fotos dieser Person",
+                photo_options,
+                format_func=lambda x: photo_labels.get(x, x),
+                key=f"p_{pid}_fotos",
+                help="Alle Fotos, die diese Person zeigen. Unten wählst du, welches die Comic-App als Vorlage nimmt.",
+            )
+            fotos_sel = list(st.session_state.get(f"p_{pid}_fotos") or [])
+            if fotos_sel:
+                ki = pers.get("ki_hauptfoto") or ""
+                if st.session_state.get(f"p_{pid}_haupt") not in fotos_sel:
+                    st.session_state[f"p_{pid}_haupt"] = pers.get("foto_id") if pers.get("foto_id") in fotos_sel else fotos_sel[0]
+                tcols = st.columns(min(5, len(fotos_sel)))
+                for i, fid in enumerate(fotos_sel):
+                    ph = photo_by_id.get(fid)
+                    with tcols[i % len(tcols)]:
+                        if ph and ph.jpeg:
+                            st.image(core.to_jpeg(core.load_image_bytes(ph.jpeg)[0], 300, 80), width="stretch")
+                            st.caption(("⭐ KI-Vorschlag · " if fid == ki and len(fotos_sel) > 1 else "") + f"{fid} · " + core.photo_suitability(ph))
+                st.radio(
+                    "Hauptfoto für den Comic (Vorlage für das Charakter-Sheet)",
+                    fotos_sel,
+                    format_func=lambda x, ki=ki, n=len(fotos_sel): f"{x}{' ⭐' if x == ki and n > 1 else ''}",
+                    horizontal=True,
+                    key=f"p_{pid}_haupt",
+                )
+                if len(fotos_sel) > 1:
+                    if pers.get("hauptfoto_grund"):
+                        st.caption(f"KI: {pers['hauptfoto_grund']}")
+                    st.checkbox("Hauptfoto passt", key=f"p_{pid}_ok")
+
+                # Zuschneiden: maximal eine Person/Figur pro Bild
+                hid = st.session_state.get(f"p_{pid}_haupt")
+                hph = photo_by_id.get(hid)
+                if hph and hph.jpeg:
+                    crop = (pers.get("zuschnitte") or {}).get(hid)
+                    n_subj = core.subject_count(hph)
+                    on_key, cx_key, cy_key = f"p_{pid}_crop_on_{hid}", f"p_{pid}_cx_{hid}", f"p_{pid}_cy_{hid}"
+                    if on_key not in st.session_state:
+                        st.session_state[on_key] = bool(crop)
+                    b0 = crop or [0, 0, 1, 1]
+                    cx_default = (int(round(b0[0] * 100)), int(round(b0[2] * 100)))
+                    cy_default = (int(round(b0[1] * 100)), int(round(b0[3] * 100)))
+                    hint = f" – auf dem Foto sind {n_subj} Personen/Tiere" if n_subj > 1 else ""
+                    st.checkbox(f"✂️ Hauptfoto zuschneiden, sodass nur {pers.get('name')} zu sehen ist{hint}", key=on_key)
+                    if st.session_state.get(on_key):
+                        z1, z2 = st.columns([2, 1])
+                        with z1:
+                            st.slider("Ausschnitt links → rechts (%)", 0, 100, value=st.session_state.get(cx_key, cx_default), key=cx_key)
+                            st.slider("Ausschnitt oben → unten (%)", 0, 100, value=st.session_state.get(cy_key, cy_default), key=cy_key)
+                            if crop:
+                                st.caption("Vorschlag der KI vorausgefüllt – bei Bedarf anpassen.")
+                        with z2:
+                            cx = st.session_state.get(cx_key) or cx_default
+                            cy = st.session_state.get(cy_key) or cy_default
+                            box = core.normalize_box([cx[0], cy[0], cx[1], cy[1]])
+                            if box:
+                                st.image(core.crop_jpeg(core.to_jpeg(core.load_image_bytes(hph.jpeg)[0], 600, 80), box), caption="Ausschnitt für die Comic-App", width="stretch")
+                            else:
+                                st.warning("Ausschnitt zu klein.")
+            if f"p_{pid}_foto_position_next" in st.session_state:
+                st.session_state[f"p_{pid}_foto_position"] = st.session_state.pop(f"p_{pid}_foto_position_next")
+            st.text_input("Position auf dem Hauptfoto", key=f"p_{pid}_foto_position", placeholder="z. B. links, mit Brille")
             st.text_area("Beschreibung (Aussehen, Beruf, Hobbys)", key=f"p_{pid}_beschreibung", height=80)
             st.text_input("Outfit (nur wenn vom Kunden vorgegeben – sonst schlägt die Comic-App eins vor)", key=f"p_{pid}_outfit")
             if pers.get("begruendung"):
@@ -512,7 +596,10 @@ if result:
              "weitere_foto_ids": [], "zuordnung_sicherheit": "kein_foto", "begruendung": ""}
         )
         for f in PERSON_FIELDS:
-            st.session_state[f"p_{new_id}_{f}"] = {"name": f"Person {new_id}", "rolle": "Nebenfigur", "art": "Mensch", "aktiv": True, "foto_id": "—"}.get(f, "")
+            st.session_state[f"p_{new_id}_{f}"] = {"name": f"Person {new_id}", "rolle": "Nebenfigur", "art": "Mensch", "aktiv": True}.get(f, "")
+        st.session_state[f"p_{new_id}_fotos"] = []
+        st.session_state[f"p_{new_id}_haupt"] = ""
+        st.session_state[f"p_{new_id}_ok"] = False
         st.rerun()
 
     # Download
