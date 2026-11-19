@@ -563,9 +563,12 @@ Antworte NUR mit JSON in genau diesem Format:
     {"position": "z.B. links, Mitte, vorne, einzige Person",
      "geschlecht": "maennlich" | "weiblich" | "unklar",
      "alter_geschaetzt": Zahl (geschaetztes Alter in Jahren),
-     "merkmale": "Haare, Brille, Bart, Kleidung, Besonderheiten - kurz"}
+     "merkmale": "Haare, Brille, Bart, Kleidung, Besonderheiten - kurz",
+     "box": [links, oben, rechts, unten] (Bildausschnitt dieser Person, Kopf bis Oberkoerper, als Anteile 0-1 der
+       Bildbreite/-hoehe, z.B. [0.05, 0.1, 0.45, 0.8])}
   ],
-  "tiere": [{"position": "...", "art": "z.B. Hund", "rasse": "falls erkennbar", "merkmale": "Fell, Farbe"}],
+  "tiere": [{"position": "...", "art": "z.B. Hund", "rasse": "falls erkennbar", "merkmale": "Fell, Farbe",
+             "box": [links, oben, rechts, unten]}],
   "qualitaet": "gut" | "mittel" | "schlecht",
   "qualitaet_grund": "z.B. unscharf, Gesicht verdeckt, zu dunkel, Sonnenbrille - leer wenn gut",
   "gesicht_sichtbar": "gut" | "teilweise" | "nein",
@@ -601,6 +604,8 @@ AUFGABE:
    Hat eine Figur MEHRERE Fotos, liste ALLE ihre Fotos auf und setze das Foto an die ERSTE Stelle, mit dem sich
    die Comicfigur am besten erstellen laesst (beste Qualitaet, Gesicht gut sichtbar, moeglichst allein im Bild,
    hohe "eignung_charakter"). Begruende die Wahl in "hauptfoto_grund".
+   Jede Figur soll am Ende ein Bild bekommen, auf dem NUR sie zu sehen ist: Bei Gruppenfotos gib deshalb die "box"
+   der Figur an, damit das Foto auf diese Figur zugeschnitten werden kann.
 4. Vergleiche das Alter laut Text mit dem geschaetzten Alter auf dem Foto.
 5. Schreibe ein klares Briefing (Deutsch) fuer den Comic-Autor: nur Story-relevantes, gut gegliedert,
    alle Kundenwuensche erhalten, nichts dazuerfinden.
@@ -622,7 +627,8 @@ Antworte NUR mit JSON in genau diesem Format:
      "alter_foto": Zahl oder null (geschaetztes Alter auf dem zugeordneten Foto),
      "beschreibung": "Aussehen/Eigenschaften laut Text und Foto, Beruf, Hobbys - kurz",
      "outfit_kunde": "nur wenn der Kunde Kleidung ausdruecklich vorgibt, sonst leer",
-     "fotos": [{"foto_id": "P1", "position": "z.B. links / einzige Person"}],
+     "fotos": [{"foto_id": "P1", "position": "z.B. links / einzige Person",
+                "box": "bei Gruppenfotos: box dieser Figur aus der Fotoanalyse uebernehmen, sonst null"}],
      "hauptfoto_grund": "nur bei mehreren Fotos: warum das erste Foto am besten ist",
      "zuordnung_sicherheit": "hoch" | "mittel" | "niedrig" | "kein_foto",
      "begruendung": "kurz, warum dieses Foto"}
@@ -709,9 +715,12 @@ def _photo_block(photos: List[Photo]) -> str:
         a = p.analyse or {}
         pers = "; ".join(
             f"{x.get('position', '?')}: {x.get('geschlecht', '?')}, ca. {x.get('alter_geschaetzt', '?')} J., {x.get('merkmale', '')}"
+            f" box={x.get('box')}"
             for x in a.get("personen") or []
         )
-        tiere = "; ".join(f"{x.get('art', '?')} {x.get('rasse', '')} ({x.get('position', '')})" for x in a.get("tiere") or [])
+        tiere = "; ".join(
+            f"{x.get('art', '?')} {x.get('rasse', '')} ({x.get('position', '')}) box={x.get('box')}" for x in a.get("tiere") or []
+        )
         lines.append(
             f"{p.id} [{p.herkunft}, {p.original_breite}x{p.original_hoehe} px]: Personen: {pers or 'keine'} | Tiere: {tiere or 'keine'}"
             f" | Qualitaet: {a.get('qualitaet', '?')} | Gesicht: {a.get('gesicht_sichtbar', '?')}"
@@ -750,6 +759,7 @@ def _num(v: Any) -> Optional[int]:
 def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos: List[Photo]) -> Dict[str, Any]:
     """Baut das bearbeitbare Ergebnis aus Shopify-Daten und KI-Antwort."""
     valid_ids = {p.id for p in photos if p.jpeg and not p.ist_screenshot}
+    by_id = {p.id: p for p in photos}
     personen = []
     for i, raw in enumerate(story.get("personen") or [], start=1):
         fotos = [f for f in raw.get("fotos") or [] if isinstance(f, dict) and f.get("foto_id") in valid_ids]
@@ -769,6 +779,11 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
                 "foto_position": str(fotos[0].get("position") or "") if fotos else "",
                 "weitere_foto_ids": [f["foto_id"] for f in fotos[1:]],
                 "foto_positionen": {f["foto_id"]: str(f.get("position") or "") for f in fotos},
+                "zuschnitte": {
+                    f["foto_id"]: expand_box(normalize_box(f.get("box")))
+                    for f in fotos
+                    if normalize_box(f.get("box")) and subject_count(by_id[f["foto_id"]]) > 1
+                },
                 "ki_hauptfoto": fotos[0]["foto_id"] if fotos else "",
                 "hauptfoto_grund": str(raw.get("hauptfoto_grund") or ""),
                 "hauptfoto_bestaetigt": len(fotos) <= 1,
@@ -792,6 +807,48 @@ def build_result(order: Optional[Dict[str, Any]], story: Dict[str, Any], photos:
         "ki_meldungen": [m for m in story.get("meldungen") or [] if isinstance(m, dict) and m.get("text")],
         "fotos_ohne_zuordnung_ki": story.get("fotos_ohne_zuordnung") or [],
     }
+
+
+def subject_count(p: Photo) -> int:
+    """Anzahl Personen + Tiere auf dem Foto laut Bildanalyse."""
+    a = p.analyse or {}
+    return len(a.get("personen") or []) + len(a.get("tiere") or [])
+
+
+def normalize_box(box: Any) -> Optional[List[float]]:
+    """[links, oben, rechts, unten] als Anteile 0-1; akzeptiert auch Prozentwerte. Ungueltig -> None."""
+    try:
+        vals = [float(v) for v in list(box)[:4]]
+    except Exception:
+        return None
+    if len(vals) != 4:
+        return None
+    if max(vals) > 1.0:
+        vals = [v / 100.0 for v in vals]
+    l, t, r, b = [min(1.0, max(0.0, v)) for v in vals]
+    if r - l < 0.05 or b - t < 0.05:
+        return None
+    return [round(l, 3), round(t, 3), round(r, 3), round(b, 3)]
+
+
+def expand_box(box: Optional[List[float]], pad: float = 0.12) -> Optional[List[float]]:
+    """Etwas Rand um den Ausschnitt lassen (Haare, Schultern)."""
+    if not box:
+        return None
+    l, t, r, b = box
+    w, h = r - l, b - t
+    return [round(max(0.0, l - w * pad), 3), round(max(0.0, t - h * pad), 3), round(min(1.0, r + w * pad), 3), round(min(1.0, b + h * pad), 3)]
+
+
+def crop_jpeg(jpeg: bytes, box: List[float], quality: int = 92) -> bytes:
+    """Schneidet ein Foto auf den Ausschnitt [links, oben, rechts, unten] (Anteile 0-1) zu."""
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    w, h = img.size
+    l, t, r, b = box
+    area = (int(l * w), int(t * h), max(int(l * w) + 1, int(r * w)), max(int(t * h) + 1, int(b * h)))
+    buf = io.BytesIO()
+    img.crop(area).save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
 
 
 def photo_suitability(p: Photo) -> str:
@@ -873,8 +930,10 @@ def check_result(result: Dict[str, Any], order: Optional[Dict[str, Any]], photos
             )
         ana = by_id[fid].analyse or {}
         n_people = len(ana.get("personen") or []) + len(ana.get("tiere") or [])
-        if n_people > 1 and not (pers.get("foto_position") or "").strip():
-            out.append(Meldung("warnung", f"{name}: Foto {fid} ist ein Gruppenfoto – bitte Position der Person angeben."))
+        if n_people > 1 and not (pers.get("zuschnitte") or {}).get(fid):
+            out.append(
+                Meldung("warnung", f"{name}: Foto {fid} ist ein Gruppenfoto ({n_people} Personen/Tiere) – bitte auf {name} zuschneiden.")
+            )
         if art == "Mensch" and ana and not ana.get("personen") and ana.get("tiere"):
             out.append(Meldung("warnung", f"{name}: Foto {fid} zeigt ein Tier, aber {name} ist als Mensch eingetragen."))
         if art == "Tier" and ana and ana.get("personen") and not ana.get("tiere"):
@@ -882,7 +941,13 @@ def check_result(result: Dict[str, Any], order: Optional[Dict[str, Any]], photos
 
     for fid, names in used.items():
         if len(names) > 1:
-            out.append(Meldung("hinweis", f"Foto {fid} wird für mehrere Figuren genutzt ({', '.join(names)}) – Gruppenfoto."))
+            ohne = [p.get("name") for p in aktive if p.get("foto_id") == fid and not (p.get("zuschnitte") or {}).get(fid)]
+            if ohne:
+                out.append(
+                    Meldung("warnung", f"Foto {fid} wird für mehrere Figuren genutzt ({', '.join(names)}) – bitte für jede Figur zuschneiden.")
+                )
+            else:
+                out.append(Meldung("hinweis", f"Foto {fid} ist für {', '.join(names)} jeweils zugeschnitten."))
 
     all_used = set(used) | {f for p in aktive for f in p.get("weitere_foto_ids") or []}
     for p in photos:
@@ -996,6 +1061,12 @@ def build_zip(
 
     personen_out = []
     for idx, pers in enumerate(aktive, start=1):
+        fid = pers.get("foto_id") or ""
+        box = (pers.get("zuschnitte") or {}).get(fid)
+        foto_datei = photo_name.get(fid, "")
+        if box and fid in by_id and by_id[fid].jpeg:
+            foto_datei = f"fotos/{fid.lower()}_{idx:02d}_{_slug(pers['name'])}_ausschnitt.jpg"
+            files[foto_datei] = crop_jpeg(by_id[fid].jpeg, box)
         personen_out.append(
             {
                 "id": idx,
@@ -1009,7 +1080,9 @@ def build_zip(
                 "beschreibung": pers.get("beschreibung", ""),
                 "hinweis": compose_hint(pers),
                 "outfit": pers.get("outfit", ""),
-                "foto": photo_name.get(pers.get("foto_id") or "", ""),
+                "foto": foto_datei,
+                "foto_original": photo_name.get(fid, ""),
+                "zuschnitt": box,
                 "foto_id": pers.get("foto_id") or "",
                 "foto_position": pers.get("foto_position", ""),
                 "foto_herkunft": by_id[pers["foto_id"]].herkunft if pers.get("foto_id") in by_id else "",
