@@ -171,7 +171,36 @@ class ShopifyClient:
             + "} } }",
             {"n": int(limit), "q": q or None},
         )
-        return ((data.get("orders") or {}).get("nodes")) or []
+        return self.add_customer_info(((data.get("orders") or {}).get("nodes")) or [])
+
+    CUSTOMER_FIELDS = """
+      ... on Order {
+        id
+        customer { displayName firstName lastName }
+        billingAddress { name firstName lastName city }
+        shippingAddress { name firstName lastName city }
+      }
+    """
+
+    def add_customer_info(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ergänzt Name der Kundin und Versandort (geschützte Kundendaten).
+
+        Läuft als eigene Abfrage, damit die restlichen Daten auch dann kommen,
+        wenn Shopify die Kundendaten (noch) nicht freigegeben hat.
+        """
+        ids = [o.get("id") for o in orders if o.get("id") and "kunde_name" not in o]
+        for i in range(0, len(ids), 50):
+            chunk = ids[i : i + 50]
+            try:
+                data = self.graphql("query($ids:[ID!]!){ nodes(ids:$ids){" + self.CUSTOMER_FIELDS + "} }", {"ids": chunk})
+            except Exception:
+                return orders
+            info = {n.get("id"): n for n in (data.get("nodes") or []) if isinstance(n, dict)}
+            for o in orders:
+                n = info.get(o.get("id"))
+                if n:
+                    o["kunde_name"], o["versandort"] = customer_name_and_city(n)
+        return orders
 
     def get_order(self, number: str) -> Optional[Dict[str, Any]]:
         num = normalize_order_number(number)
@@ -184,8 +213,29 @@ class ShopifyClient:
         nodes = ((data.get("orders") or {}).get("nodes")) or []
         for node in nodes:
             if normalize_order_number(node.get("name", "")) == num:
-                return node
-        return nodes[0] if nodes else None
+                return self.add_customer_info([node])[0]
+        return self.add_customer_info(nodes[:1])[0] if nodes else None
+
+
+def _full_name(d: Optional[Dict[str, Any]], key: str = "name") -> str:
+    d = d or {}
+    name = str(d.get(key) or "").strip()
+    if not name:
+        name = " ".join(str(d.get(k) or "").strip() for k in ("firstName", "lastName")).strip()
+    return name
+
+
+def customer_name_and_city(order: Dict[str, Any]) -> Tuple[str, str]:
+    """Name der Kundin (Käuferin) und Versandort (Stadt der Lieferadresse)."""
+    name = (
+        _full_name(order.get("customer"), "displayName")
+        or _full_name(order.get("billingAddress"))
+        or _full_name(order.get("shippingAddress"))
+    )
+    if "@" in name:
+        name = _full_name(order.get("billingAddress")) or _full_name(order.get("shippingAddress"))
+    city = str((order.get("shippingAddress") or {}).get("city") or (order.get("billingAddress") or {}).get("city") or "").strip()
+    return name, city
 
 
 def normalize_order_number(value: Any) -> str:
@@ -328,6 +378,8 @@ def extract_order(order: Dict[str, Any], item_index: int = 0) -> Dict[str, Any]:
         "bestellung": normalize_order_number(order.get("name")),
         "bestellname": order.get("name") or "",
         "datum": order.get("createdAt") or "",
+        "kunde_name": order.get("kunde_name") or customer_name_and_city(order)[0],
+        "versandort": order.get("versandort") or customer_name_and_city(order)[1],
         "notiz": (order.get("note") or "").strip(),
         "bestell_attribute": {k: v for k, v in order_attrs.items() if not k.lower().startswith("zigpoll")},
         "artikel": item.get("title") or item.get("name") or "",
@@ -1156,6 +1208,8 @@ def build_zip(
             "nummer": nummer,
             "shopify": bool(order),
             "datum": (order or {}).get("datum", ""),
+            "kunde_name": (order or {}).get("kunde_name", ""),
+            "versandort": (order or {}).get("versandort", ""),
             "artikel": (order or {}).get("artikel", ""),
             "variante": (order or {}).get("variante", ""),
             "weitere_personen": (order or {}).get("weitere_personen", ""),
@@ -1206,6 +1260,7 @@ def _readable_summary(data: Dict[str, Any]) -> str:
     c = data["comic"]
     lines = [
         f"Ahoi Comic – Vorarbeiter – Bestellung {data['bestellung']['nummer']}",
+        f"Kundin: {data['bestellung'].get('kunde_name') or '–'}   Versandort: {data['bestellung'].get('versandort') or '–'}",
         f"Titel: {c['titel']}{' (Vorschlag)' if c['titel_ist_vorschlag'] else ''}",
         f"Genre: {c['genre']}   Seiten: {c['seiten']}",
         "",
