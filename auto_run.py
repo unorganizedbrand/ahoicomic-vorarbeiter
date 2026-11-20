@@ -75,7 +75,7 @@ def shopify_orders_since(shop: core.ShopifyClient, since: dt.datetime) -> Tuple[
             data = shop.graphql(
                 "query($q:String){ orders(first:100, sortKey:CREATED_AT, query:$q){ nodes {" + fields + "} } }", {"q": q}
             )
-            return ((data.get("orders") or {}).get("nodes")) or [], with_mail
+            return shop.add_customer_info(((data.get("orders") or {}).get("nodes")) or []), with_mail
         except Exception as e:
             if not with_mail:
                 raise
@@ -90,7 +90,7 @@ def shopify_order_by_email(shop: core.ShopifyClient, addr: str) -> Optional[Dict
             {"q": f"email:{addr}"},
         )
         nodes = ((data.get("orders") or {}).get("nodes")) or []
-        return nodes[0] if nodes else None
+        return shop.add_customer_info(nodes[:1])[0] if nodes else None
     except Exception:
         return None
 
