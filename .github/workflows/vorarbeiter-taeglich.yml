@@ -1,0 +1,49 @@
+name: Vorarbeiter täglich 5 Uhr
+
+on:
+  schedule:
+    # GitHub rechnet in UTC: 03:00 UTC = 5 Uhr Sommerzeit, 04:00 UTC = 5 Uhr Winterzeit.
+    # auto_run.py lässt nur den passenden der beiden Starts laufen.
+    - cron: "0 3 * * *"
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_hours:
+        description: "Zeitraum in Stunden"
+        required: false
+        default: "24"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vorarbeiter-taeglich
+  cancel-in-progress: false
+
+jobs:
+  vorarbeiter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Pakete installieren
+        run: pip install -r requirements.txt
+      - name: Vorarbeiter ausführen
+        env:
+          RUN_SCHEDULE: ${{ github.event.schedule }}
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SHOPIFY_SHOP: vavedi-e6
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          MAIL_USER: moin@ahoicomic.de
+          MAIL_TO: moin@ahoicomic.de
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          IMAP_HOST: imap.ionos.de
+          SMTP_HOST: smtp.ionos.de
+        run: python auto_run.py
